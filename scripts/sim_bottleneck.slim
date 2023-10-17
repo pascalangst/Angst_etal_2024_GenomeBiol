@@ -1,0 +1,222 @@
+//// slim v.4.0.1 code to simulate individual subpopulaitons with sexual reproduction every 8th generation
+// includes subpopulation founding and immigration
+// calctempFST.R script need to be in same directory
+
+// initiallize everything
+initialize() {
+	
+	initializeSLiMModelType(modelType="nonWF"); // nonWF model
+	defineGlobal("K", 300); // carrying capacity source subpops
+	defineGlobal("I", 300); // carrying capacity experimental subpop
+	defineGlobal("Y", -1); // year
+	defineGlobal("M", 0.01); // MAF filter
+	defineGlobal("D", c(1,2,1,1,1,3,1,1,1,1,1,4,1,1,1,1,1,1,1,5,1,1,1,1,1,1,1,1,1,6,1,1,1,1,1,1,1,1,1,1,1,7));	
+		
+	initializeMutationRate(1e-8); // mutation rate
+	
+	initializeMutationType("m1", 0.5, "f", 0.0);         // synonymous
+	m1.convertToSubstitution = T;
+	initializeMutationType("m2", 0.1, "g", -0.03, 0.2);  // mildly deleterious
+	m2.convertToSubstitution = F; // not remove them to see potential effect of hybrid vigor
+	
+	initializeGenomicElementType("g1", c(m1,m2), c(1,1));  // exon
+	
+	// Generate 1 000 000-base chromosome
+	initializeGenomicElement(g1, 0, 10000000);
+	
+	initializeRecombinationRate(1e-8); // recombination rate
+	
+	defineConstant("RSCRIPT", "/usr/local/bin/Rscript"); // R location
+}
+
+reproduction() {
+	// every 8th generation do sexual reproduction
+	if (sim.cycle % 8 == 0)
+	{
+		// generate each offspring with an independently drawn mate
+		mate = subpop.sampleIndividuals(1, exclude=individual);
+		if (mate.size())
+			subpop.addCrossed(individual, mate);
+	}
+	// the rest of the time do clonal reproduction
+	else
+	{
+		for (i in 1:4) subpop.addCloned(individual);
+	}
+}
+
+// create a population of K individuals in generation 1
+1 early() {
+	sim.addSubpop("p1", K);
+	sim.addSubpop("p2", K);
+}
+
+early() {
+	if (sim.cycle % 8 == 0)
+	{
+		// non-overlapping generations; kill off the parental generation over winter
+		inds = sim.subpopulations.individuals;
+		ages = inds.age;
+		inds[ages > 0].fitnessScaling = 0.0;
+		inds = inds[ages == 0];
+	}
+	
+	// density-dependence
+	for (subpop in sim.subpopulations) {
+		if (subpop == p1) {
+			subpop.fitnessScaling = K / subpop.individualCount;
+		}
+		if (subpop == p2) {
+			subpop.fitnessScaling = K / subpop.individualCount;
+		}
+	}
+}
+
+// run to generation 10000, dividable by 8
+10000 late() {
+	
+	// add experimental population and add one indiv. from p1 (in this case it should be a sexual offspring)
+	sim.addSubpop("p10", 0);
+	p10.takeMigrants(p1.sampleIndividuals(sample(D, 1)));
+	// add subpop for indiv to be trashed	
+	sim.addSubpop("p99", 0);
+}
+
+10001: early() {
+	for (subpop in sim.subpopulations) {
+		if (subpop == p10) {
+			subpop.fitnessScaling = I / subpop.individualCount;
+		}
+	}
+	
+	for (subpop in sim.subpopulations) {
+		if (subpop == p99) {
+			subpop.fitnessScaling = 1 / subpop.individualCount;
+		}
+	}
+	
+	for (subpop in sim.subpopulations) {
+		if (subpop == p1) {
+			subpop.fitnessScaling = 1 / subpop.individualCount;
+		}
+	}
+}
+
+
+10000:10500 late() {
+	
+	if (sim.cycle % 8 == 0) {
+		// year increment
+		defineGlobal("Y", Y + 1);
+	}
+	
+	if (sim.cycle % 8 == 1) {
+		
+		// calculate median MAF
+		nonzero = sim.mutationFrequencies(p10)[sim.mutationFrequencies(p10) != 0];
+		nonhomo = nonzero[nonzero != 1];
+		MAFfilter = nonhomo[nonhomo > M];
+		MAFfilter[MAFfilter > 0.5] = 1 - MAFfilter[MAFfilter > 0.5];
+		
+		if (sim.cycle == 10001)	{
+			
+			if(length(MAFfilter) == 0) {
+				sim.simulationFinished();
+				stop("Did not reach fixation of any allele in chosen individual.");
+			}
+			
+			else {
+				// calculate theta
+				theta = calcWattersonsTheta(p10.genomes, muts = unique(p10.genomes.mutations)[p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) > M & p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) < 1-M]);
+				
+				// for first sample, write mutations and frequencies
+				writeFile("slim_muts_0.tmp", paste(unique(p10.genomes.mutations)[p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) > M & p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) < 1-M]));
+				
+				writeFile("slim_freq_0.tmp", paste(p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)[p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) > M & p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) < 1-M])));
+				
+				system("cp slim_muts_0.tmp slim_muts_1.tmp");
+				system("cp slim_freq_0.tmp slim_freq_1.tmp");
+				
+				line = paste(getSeed(), sim.cycle, Y, "spr", quantile(MAFfilter, 0.5), theta, "NA", "NA", sep=", ");
+			}
+		}
+		
+		else {
+			
+			if(length(MAFfilter) == 0) {
+				// if no mutations, fill NAs
+				line = paste(getSeed(), sim.cycle, Y, "spr", "NA", "NA", "NA", "NA", sep=", ");
+			}
+			
+			else {
+				// calculate theta				
+				theta = calcWattersonsTheta(p10.genomes, muts = unique(p10.genomes.mutations)[p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) > M & p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) < 1-M]);
+				
+				// calculate pairwise FST to last sample
+				writeFile("slim_muts_2.tmp", paste(unique(p10.genomes.mutations)[p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) > M & p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) < 1-M]));
+				
+				writeFile("slim_freq_2.tmp", paste(p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)[p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) > M & p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) < 1-M])));
+				
+				system(RSCRIPT, args="calctempFST.R");
+				
+				line = paste(getSeed(), sim.cycle, Y, "spr", quantile(MAFfilter, 0.5), theta, asFloat(readFile("fst_1.tmp")), asFloat(readFile("fst_0.tmp")), sep=", ");
+			}
+		}
+		
+		// write to file
+		writeFile("sim_founding_bottleneck10.csv", line, append=T);
+	}
+	
+	if (sim.cycle % 8 == 7) {
+		
+		// calculate median MAF
+		nonzero = sim.mutationFrequencies(p10)[sim.mutationFrequencies(p10) != 0];
+		nonhomo = nonzero[nonzero != 1];
+		MAFfilter = nonhomo[nonhomo > M];
+		MAFfilter[MAFfilter > 0.5] = 1 - MAFfilter[MAFfilter > 0.5];
+		
+		if(length(MAFfilter) == 0) {
+			line = paste(getSeed(), sim.cycle, Y, "smr",  "NA", "NA", "NA", "NA", sep=", ");
+		}
+		else{
+			
+			// calculate theta			
+			theta = calcWattersonsTheta(p10.genomes, muts = unique(p10.genomes.mutations)[p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) > M & p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) < 1-M]);
+			
+			// calculate pairwise FST to last sample
+			writeFile("slim_muts_2.tmp", paste(unique(p10.genomes.mutations)[p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) > M & p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) < 1-M]));
+			
+			writeFile("slim_freq_2.tmp", paste(p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)[p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) > M & p10.genomes.mutationFrequenciesInGenomes(unique(p10.genomes.mutations)) < 1-M])));
+			
+			system(RSCRIPT, args="calctempFST.R");
+			
+			line = paste(getSeed(), sim.cycle, Y, "smr",  quantile(MAFfilter, 0.5), theta, asFloat(readFile("fst_1.tmp")), asFloat(readFile("fst_0.tmp")), sep=", ");
+		}
+		
+		// write to file
+		writeFile("sim_founding_bottleneck10.csv", line, append=T);
+	}
+
+}
+
+// bottleneck of 10
+10008:10500 late() {
+	
+	if (sim.cycle % 8 == 0) {
+		
+		p99.takeMigrants(p10.sampleIndividuals(p10.individualCount - 10));
+	}
+}
+
+10081: early() {
+	for (subpop in sim.subpopulations) {
+		if (subpop == p2) {
+			subpop.fitnessScaling = 1 / subpop.individualCount;
+		}
+	}
+}
+
+
+10500 late() {
+	sim.simulationFinished();   // finish run
+}
